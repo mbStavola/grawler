@@ -42,7 +42,7 @@ func main() {
 
 	client := &http.Client{
 		Transport: &headerTransport{},
-		Timeout:   1 * time.Second,
+		Timeout:   5 * time.Second,
 	}
 
 	parsedURL, err := url.Parse(*firstURL)
@@ -51,7 +51,7 @@ func main() {
 		return
 	}
 
-	visited, visitingRules, finished := vet(client, *parsedURL, *queueSize)
+	visited, visitingRules, finished := manager(client, *parsedURL, *queueSize)
 	graph, err := printer(finished)
 
 	if err != nil {
@@ -65,9 +65,7 @@ func main() {
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
 	<-sc
 
-	if err = ioutil.WriteFile("grawled.gv", []byte(graph.String()), 0777); err != nil {
-		fmt.Println(err)
-	}
+	writeGraph(graph)
 
 	urlTotal := 0
 	for range visited {
@@ -83,7 +81,7 @@ func main() {
 	fmt.Printf("Crawled %d urls for %d unique sites\n", urlTotal, domainTotal)
 }
 
-func vet(client *http.Client, initialURL url.URL, queueSize int) (visited robots.Set, visitingRules map[string]robots.CrawlRules, finished chan website) {
+func manager(client *http.Client, initialURL url.URL, queueSize int) (visited robots.Set, visitingRules map[string]robots.CrawlRules, finished chan website) {
 	visited = make(robots.Set)
 	visitingRules = make(map[string]robots.CrawlRules)
 
@@ -176,7 +174,7 @@ func crawl(client *http.Client, toCrawl website, vettingQueue chan<- []website, 
 		urlsToVet = append(urlsToVet, toVet)
 	}
 
-	go func() { vettingQueue <- urlsToVet }()
+	vettingQueue <- urlsToVet
 	finished <- toCrawl
 }
 
@@ -201,38 +199,63 @@ func printer(finished <-chan website) (*gographviz.Graph, error) {
 			website := <-finished
 
 			websiteHostname := fmt.Sprintf("\"%s\"", website.Hostname())
-			websitePath := fmt.Sprintf("\"%s\"", website.Path)
-			websiteNodeName := hashURL(website.URL)
-			websiteGraphName := hash(website.Hostname())
+			websitePath := fmt.Sprintf("\"%s\"", website.EscapedPath())
+			websiteGraphName := fmt.Sprintf("cluster_%s", hash(website.Hostname()))
 
-			reffererNodeName := hashURL(website.referrer)
-
-			// If there is no referrer, this must be the entrypoint into the system
-			if website.referrer.Hostname() == "" {
-				graph.AddSubGraph(graphName, websiteGraphName, map[string]string{"label": websiteHostname})
-				graph.AddNode(websiteGraphName, websiteNodeName, map[string]string{"label": websitePath})
-				graph.AddEdge("start", websiteNodeName, true, map[string]string{})
-				continue
+			if !graph.IsSubGraph(websiteGraphName) {
+				graph.AddSubGraph(graphName, websiteGraphName, graphAttributes(websiteHostname))
 			}
 
 			// Add the crawled site
-			if !graph.IsSubGraph(websiteGraphName) {
-				graph.AddSubGraph(graphName, websiteGraphName, map[string]string{"label": websiteHostname})
-			}
-			graph.AddNode(websiteGraphName, websiteNodeName, map[string]string{"label": websitePath})
+			websiteNodeName := hashURL(website.URL)
+			graph.AddNode(websiteGraphName, websiteNodeName, nodeAttributes(websitePath))
 
-			// Add Link to referrer
-			graph.AddEdge(reffererNodeName, websiteNodeName, true, map[string]string{})
+			// If there is no referrer, this must be the entrypoint into the system
+			if website.referrer.Hostname() == "" {
+				graph.AddEdge("start", websiteNodeName, true, map[string]string{})
+			} else {
+				reffererNodeName := hashURL(website.referrer)
+				graph.AddEdge(reffererNodeName, websiteNodeName, true, map[string]string{})
+			}
 
 			fmt.Printf("Crawled: %s%s\n", website.Hostname(), website.Path)
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		for range ticker.C {
+			writeGraph(graph)
 		}
 	}()
 
 	return graph, nil
 }
 
+func writeGraph(graph *gographviz.Graph) {
+	output := graph.String()
+	if err := ioutil.WriteFile("grawled.gv", []byte(output), 0777); err != nil {
+		fmt.Println(err)
+	}
+}
+
+func graphAttributes(hostname string) map[string]string {
+	return map[string]string{
+		"label":   hostname,
+		"nodesep": "6",
+		"ranksep": "4",
+		"style":   "dotted",
+	}
+}
+
+func nodeAttributes(path string) map[string]string {
+	return map[string]string{
+		"label": path,
+	}
+}
+
 func hashURL(url url.URL) string {
-	token := fmt.Sprintf("\"%s%s\"", url.Hostname(), url.Path)
+	token := fmt.Sprintf("%s%s", url.Hostname(), url.Path)
 	return hash(token)
 }
 
