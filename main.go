@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,8 +34,6 @@ type website struct {
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
-
 	firstURL := flag.String("start", "https://crawler-test.com/", "First website to crawl")
 	queueSize := flag.Int("queueSize", 100, "Size of the backing queues")
 	flag.Parse()
@@ -51,7 +49,7 @@ func main() {
 		return
 	}
 
-	visited, visitingRules, finished := manager(client, *parsedURL, *queueSize)
+	visited, rulesIndex, finished := manager(client, *parsedURL, *queueSize)
 	graph, err := printer(finished)
 
 	if err != nil {
@@ -67,23 +65,13 @@ func main() {
 
 	writeGraph(graph)
 
-	urlTotal := 0
-	for range visited {
-		urlTotal++
-	}
-
-	domainTotal := 0
-	for domain, crawlRules := range visitingRules {
-		fmt.Printf("Domain: %s\n%s", domain, crawlRules.String())
-		domainTotal++
-	}
-
-	fmt.Printf("Crawled %d urls for %d unique sites\n", urlTotal, domainTotal)
+	fmt.Println(rulesIndex.String())
+	fmt.Printf("Crawled %d urls for %d unique sites\n", len(visited), rulesIndex.DomainCount())
 }
 
-func manager(client *http.Client, initialURL url.URL, queueSize int) (visited robots.Set, visitingRules map[string]robots.CrawlRules, finished chan website) {
+func manager(client *http.Client, initialURL url.URL, queueSize int) (visited robots.Set, rulesIndex robots.RulesIndex, finished chan website) {
 	visited = make(robots.Set)
-	visitingRules = make(map[string]robots.CrawlRules)
+	rulesIndex = robots.NewRulesIndex(client)
 
 	finished = make(chan website, queueSize)
 
@@ -93,40 +81,31 @@ func manager(client *http.Client, initialURL url.URL, queueSize int) (visited ro
 
 		for {
 			for _, toVet := range <-vettingQueue {
-				if _, ok := visited[toVet.String()]; ok {
+				fullURL := toVet.String()
+
+				// We don't want to crawl sites we've already visited
+				if _, ok := visited[fullURL]; ok {
+					continue
+				}
+				visited[fullURL] = true
+
+				// Load or fetch the robots.txt rules for this site
+				rules, err := rulesIndex.Get(toVet.Hostname())
+				if err != nil {
+					fmt.Println(err)
 					continue
 				}
 
-				visited[toVet.String()] = true
-
-				hostname := toVet.Hostname()
-				path := toVet.Path
-
-				if hostname == "" {
+				if ok := rules.Test(toVet.Path); !ok {
+					fmt.Printf("Skipping %s\n", fullURL)
 					continue
 				}
 
-				if _, ok := visitingRules[hostname]; !ok {
-					crawlRules, err := robots.FetchCrawlRules(client, hostname)
-					if err != nil {
-						fmt.Println(err)
-						continue
-					}
-					visitingRules[hostname] = crawlRules
-				}
-
-				rules, ok := visitingRules[hostname]
-				if !ok {
-					continue
-				}
-
-				if _, ok := rules.AllowedPaths[path]; ok {
-					// ? is there a better way to do this?
-				} else if _, ok := rules.DisallowedPaths[path]; ok {
-					continue
-				}
-
-				go crawl(client, toVet, vettingQueue, finished)
+				// Start a crawling worker
+				go func(toCrawl website) {
+					<-time.NewTimer(rules.Delay).C
+					crawl(client, toCrawl, vettingQueue, finished)
+				}(toVet)
 			}
 		}
 	}()
@@ -135,9 +114,6 @@ func manager(client *http.Client, initialURL url.URL, queueSize int) (visited ro
 }
 
 func crawl(client *http.Client, toCrawl website, vettingQueue chan<- []website, finished chan<- website) {
-	// ! Be kind, don't slam
-	time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
-
 	response, err := client.Get(toCrawl.String())
 	if err != nil {
 		fmt.Println(err)
@@ -194,6 +170,8 @@ func printer(finished <-chan website) (*gographviz.Graph, error) {
 	graph.SetName(graphName)
 	graph.AddNode(graphName, "start", map[string]string{"label": "Start"})
 
+	mutex := sync.Mutex{}
+
 	go func() {
 		for {
 			website := <-finished
@@ -203,11 +181,15 @@ func printer(finished <-chan website) (*gographviz.Graph, error) {
 			websiteGraphName := fmt.Sprintf("cluster_%s", hash(website.Hostname()))
 
 			if !graph.IsSubGraph(websiteGraphName) {
+				mutex.Lock()
 				graph.AddSubGraph(graphName, websiteGraphName, graphAttributes(websiteHostname))
+				mutex.Unlock()
 			}
 
 			// Add the crawled site
 			websiteNodeName := hashURL(website.URL)
+
+			mutex.Lock()
 			graph.AddNode(websiteGraphName, websiteNodeName, nodeAttributes(websitePath))
 
 			// If there is no referrer, this must be the entrypoint into the system
@@ -217,6 +199,7 @@ func printer(finished <-chan website) (*gographviz.Graph, error) {
 				reffererNodeName := hashURL(website.referrer)
 				graph.AddEdge(reffererNodeName, websiteNodeName, true, map[string]string{})
 			}
+			mutex.Unlock()
 
 			fmt.Printf("Crawled: %s%s\n", website.Hostname(), website.Path)
 		}
@@ -225,6 +208,8 @@ func printer(finished <-chan website) (*gographviz.Graph, error) {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		for range ticker.C {
+			mutex.Lock()
+			defer mutex.Unlock()
 			writeGraph(graph)
 		}
 	}()
