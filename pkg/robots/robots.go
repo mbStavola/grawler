@@ -11,15 +11,15 @@ import (
 )
 
 type CrawlRules struct {
-	DisallowedPaths set
-	AllowedPaths    set
+	DisallowedPaths Set
+	AllowedPaths    Set
 	Delay           time.Duration
 }
 
 func newCrawlRules() CrawlRules {
 	return CrawlRules{
-		DisallowedPaths: make(set),
-		AllowedPaths:    make(set),
+		DisallowedPaths: make(Set),
+		AllowedPaths:    make(Set),
 		Delay:           1 * time.Second,
 	}
 }
@@ -38,7 +38,7 @@ func (crawlRules *CrawlRules) String() string {
 	return fmt.Sprintf("Delay: %v\nAllowed:\n%sDisallowed:\n%s", crawlRules.Delay, allowedPaths, disallowedPaths)
 }
 
-type set = map[string]bool
+type Set = map[string]bool
 
 func FetchCrawlRules(client *http.Client, domain string) (CrawlRules, error) {
 	url := fmt.Sprintf("http://%s/robots.txt", domain)
