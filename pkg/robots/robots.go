@@ -1,3 +1,4 @@
+// Package robots provides a simple interface for working with robots.txt
 package robots
 
 import (
@@ -12,6 +13,15 @@ import (
 
 // Set provides a convience typedef for what is essentially a hashset
 type Set = map[string]bool
+
+// NewSet produces a Set from a slice, as a convenience
+func NewSet(items []string) Set {
+	set := make(Set)
+	for _, item := range items {
+		set[item] = true
+	}
+	return set
+}
 
 // RulesIndex represents a collection of access-rules by domain
 // These will be parsed from the domain's robots.txt
